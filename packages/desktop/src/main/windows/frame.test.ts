@@ -25,6 +25,10 @@ describe("native window frame", () => {
     expect(windowFrame("linux", "light").titleBarOverlay?.symbolColor).toBe("black")
   })
 
+  test("sizes the initial overlay for the saved zoom", () => {
+    expect(windowFrame("linux", "dark", 1.25).titleBarOverlay?.height).toBe(55)
+  })
+
   test.each([
     [0.2, 44],
     [1, 44],

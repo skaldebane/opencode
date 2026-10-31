@@ -1,10 +1,10 @@
 // Shared by the early window and later windows so startup uses the same native chrome.
-export function windowFrame(platform: NodeJS.Platform, mode: "light" | "dark") {
+export function windowFrame(platform: NodeJS.Platform, mode: "light" | "dark", zoom = 1) {
   if (platform === "darwin") {
     return { titleBarStyle: "hidden" as const, trafficLightPosition: { x: 14, y: 14 } }
   }
   if (platform === "win32" || platform === "linux") {
-    return { frame: false, titleBarStyle: "hidden" as const, titleBarOverlay: titlebarOverlay(mode) }
+    return { frame: false, titleBarStyle: "hidden" as const, titleBarOverlay: titlebarOverlay(mode, zoom) }
   }
   return {}
 }

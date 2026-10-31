@@ -172,13 +172,9 @@ export const SnowflakeCortexPlugin = define({
 
     const load = Effect.gen(function* () {
       const value = (yield* saved)?.value
-      account.value = normalizeAccount(
-        process.env.SNOWFLAKE_ACCOUNT ??
-          (value?.type === "key"
-            ? (value.configuration?.account ?? value.metadata?.account)
-            : value?.metadata?.account) ??
-          configured?.account,
-      )
+      const previous = account.value
+      account.value = normalizeAccount(process.env.SNOWFLAKE_ACCOUNT ?? value?.metadata?.account ?? configured?.account)
+      return account.value !== previous
     })
     yield* load
     yield* ctx.provider.transform((providers) => {
@@ -197,6 +193,9 @@ export const SnowflakeCortexPlugin = define({
       for (const item of models.list(providerID)) {
         models.update(providerID, item.id, (model) => {
           model.compatibility = { maxTokensField: "max_completion_tokens", ...model.compatibility }
+          // Cortex Chat Completions caches Claude only through explicit `cache_control` breakpoints.
+          if ((model.modelID ?? model.id).includes("claude"))
+            model.compatibility = { cacheFormat: "anthropic", ...model.compatibility }
           if (model.settings?.baseURL !== undefined)
             model.settings.baseURL = endpoint(model.settings.baseURL, account.value)
         })
@@ -204,7 +203,7 @@ export const SnowflakeCortexPlugin = define({
     })
     yield* bus.subscribe(Credential.Event.Switched).pipe(
       Stream.filter((event) => event.data.integrationID === integrationID),
-      Stream.runForEach(() => load.pipe(Effect.andThen(ctx.provider.reload()))),
+      Stream.runForEach(() => load.pipe(Effect.flatMap((changed) => (changed ? ctx.provider.reload() : Effect.void)))),
       Effect.forkScoped({ startImmediately: true }),
     )
     yield* ctx.session.hook(

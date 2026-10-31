@@ -1,12 +1,18 @@
 import { app, BrowserWindow, nativeImage, nativeTheme } from "electron"
+import type { DesktopZoomLevel } from "@opencode/app/desktop-menu"
 import type { Path } from "effect"
 import { type TitlebarTheme } from "../../shared/ipc-contract"
-import { WindowFullscreenChanged, WindowPinchZoomChanged, WindowZoomChanged } from "../../shared/ipc-rpc/events"
+import {
+  WindowFocusChanged,
+  WindowFullscreenChanged,
+  WindowPinchZoomChanged,
+  WindowZoomChanged,
+} from "../../shared/ipc-rpc/events"
 import { emitIpcEvent } from "../ipc-events"
 import type { DesktopPaths } from "../paths"
-import { BACKGROUND_COLOR_KEY, PINCH_ZOOM_ENABLED_KEY } from "../storage/keys"
+import { BACKGROUND_COLOR_KEY, PINCH_ZOOM_ENABLED_KEY, ZOOM_LEVEL_KEY } from "../storage/keys"
 import { getStore } from "../storage/store"
-import { storedBackgroundColor, tone } from "./defaults"
+import { savedBackgroundColor, storedBackgroundColor, storedZoomLevel, tone } from "./defaults"
 import { titlebarOverlay, windowFrame } from "./frame"
 
 const titlebarThemes = new WeakMap<BrowserWindow, Partial<TitlebarTheme>>()
@@ -24,7 +30,7 @@ export function windowAppearance(path: Path.Path, paths: DesktopPaths.Resolved) 
     title: "OpenCode",
     icon: iconPath(path, paths),
     backgroundColor: backgroundColor ?? storedBackgroundColor(),
-    ...windowFrame(process.platform, tone()),
+    ...windowFrame(process.platform, tone(), storedZoomLevel()),
     webPreferences: {
       preload: paths.preloadPath,
       contextIsolation: true,
@@ -54,9 +60,7 @@ export function setBackgroundColor(color: string) {
 }
 
 export function getBackgroundColor() {
-  const stored = getStore().get(BACKGROUND_COLOR_KEY)
-
-  return backgroundColor ?? (typeof stored === "string" ? stored : undefined)
+  return backgroundColor ?? savedBackgroundColor()
 }
 
 export function setTitlebar(win: BrowserWindow, theme: Partial<TitlebarTheme> = {}) {
@@ -70,6 +74,11 @@ export function setTitlebar(win: BrowserWindow, theme: Partial<TitlebarTheme> = 
   updateTitlebar(win)
 }
 
+export function setTrafficLightsPosition(win: BrowserWindow, position: { x: number; y: number }) {
+  if (process.platform !== "darwin") return
+  win.setWindowButtonPosition({ x: Math.round(position.x), y: Math.round(position.y) })
+}
+
 export function updateTitlebar(win: BrowserWindow) {
   if (process.platform !== "win32" && process.platform !== "linux") return
   win.setTitleBarOverlay(overlay(titlebarThemes.get(win), win.webContents.getZoomFactor()))
@@ -81,7 +90,7 @@ export function setPinchZoomEnabled(enabled: boolean) {
     pinchZoomEnabled.set(win, enabled)
     emitIpcEvent(win.webContents, new WindowPinchZoomChanged({ enabled }))
 
-    if (!enabled && win.webContents.getZoomFactor() !== 1) win.webContents.setZoomFactor(1)
+    if (!enabled) win.webContents.setZoomFactor(storedZoomLevel())
     updateZoom(win)
   })
 }
@@ -90,14 +99,19 @@ export function getPinchZoomEnabled() {
   return getStore().get(PINCH_ZOOM_ENABLED_KEY) === true
 }
 
-export function setZoomFactor(win: BrowserWindow, factor: number) {
-  win.webContents.setZoomFactor(clampZoom(factor))
-  updateZoom(win)
+// Saves the level and applies it to every window. A pinch zooms one window without saving.
+export function setZoomLevel(level: DesktopZoomLevel) {
+  if (storedZoomLevel() !== level) getStore().set(ZOOM_LEVEL_KEY, level)
+  BrowserWindow.getAllWindows().forEach((win) => {
+    win.webContents.setZoomFactor(level)
+    updateZoom(win)
+  })
 }
 
 export function wireZoom(win: BrowserWindow) {
   pinchZoomEnabled.set(win, getPinchZoomEnabled())
-  win.webContents.setZoomFactor(1)
+  win.webContents.setZoomFactor(storedZoomLevel())
+  updateTitlebar(win)
   win.webContents.on("zoom-changed", (event, direction) => {
     event.preventDefault()
 
@@ -109,7 +123,7 @@ export function wireZoom(win: BrowserWindow) {
       return
     }
 
-    if (win.webContents.getZoomFactor() !== 1) win.webContents.setZoomFactor(1)
+    win.webContents.setZoomFactor(storedZoomLevel())
     updateZoom(win)
   })
 }
@@ -122,6 +136,16 @@ export function wireFullscreen(win: BrowserWindow) {
 
   win.on("enter-full-screen", () => send(true))
   win.on("leave-full-screen", () => send(false))
+}
+
+export function wireFocus(win: BrowserWindow) {
+  const send = (focused: boolean) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+    emitIpcEvent(win.webContents, new WindowFocusChanged({ focused }))
+  }
+
+  win.on("focus", () => send(true))
+  win.on("blur", () => send(false))
 }
 
 function iconsDir(path: Path.Path, paths: DesktopPaths.Resolved) {
@@ -142,5 +166,8 @@ function clampZoom(value: number) {
 
 function updateZoom(win: BrowserWindow) {
   updateTitlebar(win)
-  emitIpcEvent(win.webContents, new WindowZoomChanged({ factor: win.webContents.getZoomFactor() }))
+  emitIpcEvent(
+    win.webContents,
+    new WindowZoomChanged({ factor: win.webContents.getZoomFactor(), level: storedZoomLevel() }),
+  )
 }

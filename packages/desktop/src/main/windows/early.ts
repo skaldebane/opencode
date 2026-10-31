@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, screen, shell } from "electron"
+import { Predicate } from "effect"
 import { resolveExternalURL } from "../files/external-url"
 import { windowArguments } from "./bootstrap"
 import { WINDOW_IDS_KEY } from "../storage/keys"
 import { getStore } from "../storage/store"
-import { storedBackgroundColor, tone } from "./defaults"
+import { storedBackgroundColor, storedZoomLevel, tone } from "./defaults"
 import { windowFrame } from "./frame"
 import { registerRendererProtocol } from "./protocol"
 import { loadWindow } from "./scheme"
@@ -42,33 +43,42 @@ const displays = {
 // bundle, the layers and the renderer boot. restoreWindows() adopts it through takeEarlyWindow().
 export function createEarlyWindow() {
   const ids = getStore().get(WINDOW_IDS_KEY)
-  const id = Array.isArray(ids) && typeof ids[0] === "string" ? ids[0] : randomUUID()
+  const id = Array.isArray(ids) && Predicate.isString(ids[0]) ? ids[0] : randomUUID()
   const root = path.dirname(fileURLToPath(import.meta.url))
   const file = path.join(app.getPath("userData"), windowStateFile(id))
   const state = resolveWindowState(readWindowState(file), { width: 1280, height: 800 }, displays)
+  const zoom = storedZoomLevel()
   const icons = app.isPackaged ? path.join(process.resourcesPath, "icons") : path.join(root, "../../resources/icons")
+
+  // On Windows, maximize() on a hidden window shows it with SW_SHOWMAXIMIZED, so it never paints at
+  // its normal bounds first. macOS does not reliably enter fullscreen while hidden, so it shows first.
+  const deferReveal = process.platform === "win32" && state.isMaximized
 
   const win = new BrowserWindow({
     x: state.x,
     y: state.y,
     width: state.width,
     height: state.height,
-    show: true,
+    show: !deferReveal,
     autoHideMenuBar: true,
     title: "OpenCode",
     icon: path.join(icons, `icon.${process.platform === "win32" ? "ico" : "png"}`),
     backgroundColor: storedBackgroundColor(),
-    ...windowFrame(process.platform, tone()),
+    ...windowFrame(process.platform, tone(), zoom),
     webPreferences: {
       preload: path.join(root, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // The renderer boots in this window, so it starts at the saved zoom instead of jumping to it later.
+      zoomFactor: zoom,
       additionalArguments: windowArguments(id),
     },
   })
 
   manageWindowState(win, file, state, displays)
+
+  if (deferReveal) win.show()
   // Closing the only window before the rest of the app has adopted it is a quit.
   win.once("closed", () => {
     if (pending?.win !== win) return

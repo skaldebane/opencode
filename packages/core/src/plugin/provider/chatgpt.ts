@@ -2,7 +2,7 @@ import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { define } from "@opencode/plugin/effect/plugin"
 // import { Deferred, Duration, Effect, Option, Schema, Semaphore, Stream } from "effect"
-import { Deferred, Effect, Option, Schema, Semaphore, Stream } from "effect"
+import { Deferred, Effect, Equal, Option, Schema, Semaphore, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import type { Server, ServerResponse } from "node:http"
 import { App } from "../../app.js"
@@ -15,6 +15,7 @@ import { OauthCallbackPage } from "../../oauth/page.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
 import type { PluginInternal } from "../internal.js"
+import { configuredSettings } from "./configured.js"
 
 // First-time sign-in registers a user-owned client; OpenAI returns its issued client ID on the callback.
 const registrationClientID = "dynamic_agent_client"
@@ -44,6 +45,8 @@ const fallbackModels = new Set([
   "gpt-6-sol-fast",
   "gpt-6.1-sol",
   "gpt-6.1-sol-fast",
+  "gpt-6.1-terra",
+  "gpt-6.1-terra-fast",
 ])
 const nonRetryableSharingCodes = [
   "subscription_sharing_usage_limit_exceeded",
@@ -80,7 +83,6 @@ type RemoteModel = typeof RemoteModel.Type
 const RemoteModels = Schema.Struct({ models: Schema.Array(RemoteModel) })
 const decodeCachedModels = Schema.decodeUnknownOption(Schema.Array(RemoteModel))
 
-// Credential metadata is merged into provider settings; these keys are not OpenAI request options.
 const decodeMetadata = Schema.decodeUnknownOption(
   Schema.Struct({
     clientID: Schema.String,
@@ -222,12 +224,14 @@ export const ChatGPTPlugin = define({
         ? yield* ctx.integration.connection.resolve(connection).pipe(Effect.orElseSucceed(() => undefined))
         : undefined
       chatgpt = credential?.type === "oauth" && credential.methodID === methodID ? credential : undefined
+      const previous = source
       source = chatgpt ? connection : undefined
       // if (previous !== IntegrationConnection.key(source)) {
       //   const metadata = Option.getOrUndefined(decodeMetadata(chatgpt?.metadata))
       //   const stored = metadata ? yield* ctx.storage.get(modelCacheKey(metadata.clientID)) : undefined
       //   available = Option.getOrUndefined(decodeCachedModels(stored))
       // }
+      return !Equal.equals(previous, source)
     })
 
     yield* ctx.integration.transform((editor) => {
@@ -280,6 +284,8 @@ export const ChatGPTPlugin = define({
         }),
       { providerID },
     )
+    // Config applies after provider plugins, so read it here: a custom baseURL may not decode zstd.
+    const configured = yield* configuredSettings(providerID)
     yield* ctx.provider.transform((providers) => {
       const item = providers.get(providerID)
       if (!item) return
@@ -289,6 +295,8 @@ export const ChatGPTPlugin = define({
           baseURL: resource,
           transport: "http",
           compaction: { type: "summary" },
+          // ChatGPT sign-in rejects uncompressed bodies over ~1 MiB and decodes zstd.
+          ...(configured?.baseURL === undefined ? { encoding: provider.settings?.encoding ?? "zstd" } : {}),
         })
       })
       const updated = providers.get(providerID)
@@ -351,7 +359,7 @@ export const ChatGPTPlugin = define({
     //     }),
     //   )
     // })
-    const reload = () => loading.withPermit(load().pipe(Effect.andThen(ctx.provider.reload())))
+    const reload = () => loading.withPermit(load().pipe(Effect.flatMap((changed) => (changed ? ctx.provider.reload() : Effect.void))))
     // .pipe(Effect.andThen(refreshModels().pipe(Effect.forkScoped, Effect.asVoid)))
     yield* bus.subscribe(Credential.Event.Switched).pipe(
       Stream.filter((event) => event.data.integrationID === integrationID),
